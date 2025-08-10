@@ -5,8 +5,18 @@ const { initializeApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 const admin = require('firebase-admin');
 
+require('dotenv').config();
+
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Debug environment variables (remove in production)
+console.log('Checking environment variables:');
+console.log('FIREBASE_PROJECT_ID:', process.env.FIREBASE_PROJECT_ID ? 'Set' : 'Missing');
+console.log('FIREBASE_PRIVATE_KEY_ID:', process.env.FIREBASE_PRIVATE_KEY_ID ? 'Set' : 'Missing');
+console.log('FIREBASE_PRIVATE_KEY:', process.env.FIREBASE_PRIVATE_KEY ? 'Set' : 'Missing');
+console.log('FIREBASE_CLIENT_EMAIL:', process.env.FIREBASE_CLIENT_EMAIL ? 'Set' : 'Missing');
+console.log('FIREBASE_CLIENT_ID:', process.env.FIREBASE_CLIENT_ID ? 'Set' : 'Missing');
 
 // Method 1: Using Firebase Config with Service Account Key
 const firebaseConfig = {
@@ -18,12 +28,31 @@ const firebaseConfig = {
   appId: process.env.FIREBASE_APP_ID
 };
 
+// Validate required environment variables
+const requiredEnvVars = [
+  'FIREBASE_PROJECT_ID',
+  'FIREBASE_PRIVATE_KEY_ID',
+  'FIREBASE_PRIVATE_KEY',
+  'FIREBASE_CLIENT_EMAIL',
+  'FIREBASE_CLIENT_ID'
+];
+
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+
+if (missingEnvVars.length > 0) {
+  console.error('Missing required environment variables:', missingEnvVars);
+  process.exit(1);
+}
+
 // Initialize Firebase Admin with service account credentials
 const serviceAccountCredentials = {
   type: "service_account",
   project_id: process.env.FIREBASE_PROJECT_ID,
   private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'), // Handle escaped newlines
+  // Fix private key formatting - remove quotes and handle newlines properly
+  private_key: process.env.FIREBASE_PRIVATE_KEY
+    ?.replace(/\\n/g, '\n')
+    ?.replace(/^"(.*)"$/, '$1'), // Remove surrounding quotes if present
   client_email: process.env.FIREBASE_CLIENT_EMAIL,
   client_id: process.env.FIREBASE_CLIENT_ID,
   auth_uri: "https://accounts.google.com/o/oauth2/auth",
@@ -32,36 +61,68 @@ const serviceAccountCredentials = {
   client_x509_cert_url: `https://www.googleapis.com/robot/v1/metadata/x509/${process.env.FIREBASE_CLIENT_EMAIL}`
 };
 
-// Initialize Firebase Admin
-initializeApp({
-  credential: admin.credential.cert(serviceAccountCredentials),
-  projectId: firebaseConfig.projectId
-});
+// Validate credentials format
+if (!serviceAccountCredentials.private_key.includes('-----BEGIN PRIVATE KEY-----')) {
+  console.error('Private key format appears invalid. Make sure it includes the full key with headers.');
+  console.error('Private key should start with: -----BEGIN PRIVATE KEY-----');
+  process.exit(1);
+}
 
-// Alternative Method 2: Using Application Default Credentials (for Google Cloud deployment)
-// initializeApp({
-//   credential: admin.credential.applicationDefault(),
-//   projectId: firebaseConfig.projectId
-// });
+try {
+  // Initialize Firebase Admin
+  console.log('Initializing Firebase Admin...');
+  initializeApp({
+    credential: admin.credential.cert(serviceAccountCredentials),
+    projectId: firebaseConfig.projectId
+  });
+  console.log('Firebase Admin initialized successfully');
+} catch (error) {
+  console.error('Failed to initialize Firebase Admin:', error.message);
+  console.error('Full error:', error);
+  process.exit(1);
+}
 
-// Alternative Method 3: Using service account key file
-// const serviceAccount = require('./path/to/serviceAccountKey.json');
-// initializeApp({
-//   credential: admin.credential.cert(serviceAccount)
-// });
-
-const db = getFirestore();
+let db;
+try {
+  db = getFirestore();
+  console.log('Firestore initialized successfully');
+} catch (error) {
+  console.error('Failed to initialize Firestore:', error.message);
+  process.exit(1);
+}
 
 // Middleware
 app.use(cors({
-  origin: [
-    'http://localhost:5173', 
-    'http://localhost:3000',
-    'https://localhost:5173', // HTTPS localhost
-    /^https:\/\/.*\.netlify\.app$/, // Any Netlify domain
-    /^https:\/\/.*\.vercel\.app$/, // Any Vercel domain
-    // Add your specific domains
-  ],
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    // List of allowed origins
+    const allowedOrigins = [
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'https://localhost:5173'
+    ];
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Check if origin matches Netlify pattern
+    if (origin.match(/^https:\/\/.*\.netlify\.app$/)) {
+      return callback(null, true);
+    }
+    
+    // Check if origin matches Vercel pattern
+    if (origin.match(/^https:\/\/.*\.vercel\.app$/)) {
+      return callback(null, true);
+    }
+    
+    // If none of the above, reject the request
+    const msg = `The CORS policy for this origin doesn't allow access from the particular origin: ${origin}`;
+    return callback(new Error(msg), false);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -70,7 +131,7 @@ app.use(cors({
 }));
 
 // Handle preflight requests explicitly
-app.options('*', cors());
+// app.options('/*', cors());
 
 app.use(express.json());
 
@@ -115,50 +176,44 @@ const getClientIP = (req) => {
 };
 
 // Multiple routes with different names to avoid ad blockers
+// Simple approach - just remove undefined values
 const handleVisitorLog = async (req, res) => {
   try {
-    const { fingerprint, userAgent, referrer, screenResolution, timezone } = req.body;
+    const { fingerprint, userAgent, referrer, screenResolution, timezone, url } = req.body;
     const clientIP = getClientIP(req);
     const timestamp = new Date();
 
-    // Helper function to remove undefined values
-    const cleanObject = (obj) => {
-      const cleaned = {};
-      for (const [key, value] of Object.entries(obj)) {
-        if (value !== undefined && value !== null && value !== '') {
-          if (typeof value === 'object' && !Array.isArray(value)) {
-            const cleanedNested = cleanObject(value);
-            if (Object.keys(cleanedNested).length > 0) {
-              cleaned[key] = cleanedNested;
-            }
-          } else {
-            cleaned[key] = value;
-          }
-        }
-      }
-      return cleaned;
+    // Prepare visitor data - only include defined values
+    const visitorData = {
+      ip: clientIP || 'unknown',
+      timestamp: timestamp
     };
 
-    // Prepare visitor data with cleaned values
-    const visitorData = cleanObject({
-      ip: clientIP,
-      fingerprint: fingerprint,
-      userAgent: userAgent || req.headers['user-agent'],
-      referrer: referrer || req.headers.referer,
-      screenResolution: screenResolution,
-      timezone: timezone,
-      timestamp: timestamp,
-      url: req.body.url,
-      headers: {
-        'accept-language': req.headers['accept-language'],
-        'accept-encoding': req.headers['accept-encoding'],
-        'connection': req.headers.connection,
-        'host': req.headers.host,
-        'origin': req.headers.origin
-      }
-    });
+    // Add optional fields only if they have values
+    if (fingerprint) visitorData.fingerprint = fingerprint;
+    if (userAgent || req.headers['user-agent']) {
+      visitorData.userAgent = userAgent || req.headers['user-agent'];
+    }
+    if (referrer || req.headers.referer) {
+      visitorData.referrer = referrer || req.headers.referer;
+    }
+    if (screenResolution) visitorData.screenResolution = screenResolution;
+    if (timezone) visitorData.timezone = timezone;
+    if (url) visitorData.url = url;
 
-    console.log('Cleaned visitor data:', JSON.stringify(visitorData, null, 2));
+    // Add headers that exist
+    const headers = {};
+    if (req.headers['accept-language']) headers['accept-language'] = req.headers['accept-language'];
+    if (req.headers['accept-encoding']) headers['accept-encoding'] = req.headers['accept-encoding'];
+    if (req.headers.connection) headers.connection = req.headers.connection;
+    if (req.headers.host) headers.host = req.headers.host;
+    if (req.headers.origin) headers.origin = req.headers.origin;
+    
+    if (Object.keys(headers).length > 0) {
+      visitorData.headers = headers;
+    }
+
+    console.log('Saving visitor data:', JSON.stringify(visitorData, null, 2));
 
     // Save to Firestore
     const docRef = await db.collection('visitors').add(visitorData);
