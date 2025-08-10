@@ -245,21 +245,31 @@ app.post('/api/info', handleVisitorLog);
 app.get('/api/visitor-stats', async (req, res) => {
   try {
     const visitorsRef = db.collection('visitors');
-    const snapshot = await visitorsRef.get();
+    
+    // --- Efficient Query for Recent Visits ---
+    // Order by timestamp (descending) and limit to 10 results
+    const recentVisitsSnapshot = await visitorsRef
+                                      .orderBy('timestamp', 'desc')
+                                      .limit(10)
+                                      .get();
+    
+    const recentVisits = recentVisitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // --- You might still need a full scan for other stats ---
+    // Note: This part can still be slow. Consider using aggregation functions if available.
+    const allDocsSnapshot = await visitorsRef.get();
     
     const stats = {
-      totalVisits: snapshot.size,
-      uniqueIPs: new Set(snapshot.docs.map(doc => doc.data().ip)).size,
-      uniqueDevices: new Set(snapshot.docs.map(doc => doc.data().fingerprint)).size,
-      recentVisits: snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .sort((a, b) => b.timestamp - a.timestamp)
-        .slice(0, 10)
+      totalVisits: allDocsSnapshot.size,
+      uniqueIPs: new Set(allDocsSnapshot.docs.map(doc => doc.data().ip)).size,
+      uniqueDevices: new Set(allDocsSnapshot.docs.map(doc => doc.data().fingerprint)).size,
+      recentVisits: recentVisits // Use the data from the efficient query
     };
     
     res.json(stats);
   } catch (error) {
     console.error('Error fetching stats:', error);
+    // Be sure you have created the necessary index in Firestore for this query!
     res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
