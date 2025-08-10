@@ -250,6 +250,7 @@ app.get('/api/visitor-stats', async (req, res) => {
     const stats = {
       totalVisits: snapshot.size,
       uniqueIPs: new Set(snapshot.docs.map(doc => doc.data().ip)).size,
+      uniqueDevices: new Set(snapshot.docs.map(doc => doc.data().fingerprint)).size,
       recentVisits: snapshot.docs
         .map(doc => ({ id: doc.id, ...doc.data() }))
         .sort((a, b) => b.timestamp - a.timestamp)
